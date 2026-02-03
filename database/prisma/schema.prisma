@@ -1,0 +1,1099 @@
+// MAX-LOYALTY DATABASE SCHEMA
+// Multi-tenant SaaS loyalty system
+// Version: 1.0
+// Date: 2026-02-03
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["fullTextSearch", "fullTextIndex"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum Role {
+  OWNER              // Platform owner - manages everything
+  RESTAURANTADMIN    // Restaurant account owner
+  MANAGER            // Restaurant manager - full restaurant access
+  CASHIER            // Cashier - limited access
+  GUEST              // Loyalty program participant
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PASTDUE
+  CANCELED
+  EXPIRED
+}
+
+enum SubscriptionPlanType {
+  FREE
+  STANDARD
+  MEDIUM
+  PRO
+  ULTIMATE
+  CUSTOM
+}
+
+enum CardStatus {
+  ACTIVE             // Card is active and usable
+  FROZEN             // Temporarily frozen by user/admin
+  BLOCKED            // Blocked by admin (violation)
+  INACTIVE           // No activity for 180+ days
+  EXPIRED            // Loyalty system expired
+  DELETED            // Soft deleted
+}
+
+enum LoyaltySystemType {
+  POINTS             // Points-based (e.g., 1 rub = 5 points)
+  DISCOUNT           // Discount-based (e.g., 5% off)
+}
+
+enum LoyaltySystemScope {
+  GLOBAL             // Applies to all restaurants in tenant
+  LOCAL              // Applies to specific restaurant only
+}
+
+enum BallTransactionType {
+  EARN_PURCHASE      // Earned from purchase
+  REDEEM             // Redeemed for discount
+  MANUAL_ADD         // Manually added by manager
+  MANUAL_SUBTRACT    // Manually subtracted by manager
+  PROMO_GRANTED      // Granted from promo
+  TRANSFER_SENT      // Sent to another guest
+  TRANSFER_RECEIVED  // Received from another guest
+  EXPIRED            // Expired balls
+  REFUND             // Refund from canceled purchase
+  LEVEL_BONUS        // Bonus for reaching new level
+}
+
+enum RegistrationSource {
+  MANUAL             // Manual registration by admin/manager
+  POS                // Registered via POS by cashier
+  LINK               // Registered via registration link
+  TELEGRAM           // Registered via Telegram bot
+  WEBAPP             // Registered via web application
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum ActionType {
+  // Auth & User
+  LOGIN
+  LOGOUT
+  REGISTER
+  PASSWORD_RESET
+  PASSWORD_CHANGE
+  EMAIL_VERIFY
+  PHONE_VERIFY
+  MFA_ENABLE
+  MFA_DISABLE
+  
+  // Permissions & Roles
+  GRANT_PERMISSION
+  REVOKE_PERMISSION
+  ASSIGN_ROLE
+  REMOVE_ROLE
+  
+  // Guests
+  CREATE_GUEST
+  UPDATE_GUEST
+  DELETE_GUEST
+  BLOCK_GUEST
+  UNBLOCK_GUEST
+  FREEZE_CARD
+  UNFREEZE_CARD
+  
+  // Balls
+  CREATE_BALL_TRANSACTION
+  MANUAL_ADD_BALLS
+  MANUAL_SUBTRACT_BALLS
+  TRANSFER_BALLS
+  REDEEM_BALLS
+  
+  // Loyalty System
+  CREATE_LOYALTY_SYSTEM
+  UPDATE_LOYALTY_SYSTEM
+  DELETE_LOYALTY_SYSTEM
+  CREATE_LEVEL
+  UPDATE_LEVEL
+  DELETE_LEVEL
+  CREATE_RULE
+  UPDATE_RULE
+  DELETE_RULE
+  CREATE_PROMO
+  UPDATE_PROMO
+  DELETE_PROMO
+  
+  // Subscriptions
+  CREATE_SUBSCRIPTION
+  UPGRADE_SUBSCRIPTION
+  DOWNGRADE_SUBSCRIPTION
+  CANCEL_SUBSCRIPTION
+  RENEW_SUBSCRIPTION
+  
+  // Restaurants
+  CREATE_RESTAURANT
+  UPDATE_RESTAURANT
+  DELETE_RESTAURANT
+  
+  // Staff
+  CREATE_MANAGER
+  CREATE_CASHIER
+  DELETE_STAFF
+  
+  // Owner
+  IMPERSONATE_USER
+  VIEW_TENANT_DATA
+}
+
+enum POSType {
+  IIKO
+  RKEEPER
+  CUSTOM
+}
+
+enum POSSyncDirection {
+  PUSH               // POS pushes data to us (webhook)
+  PULL               // We pull data from POS (polling)
+  BIDIRECTIONAL      // Both directions
+}
+
+enum POSSyncStatus {
+  SUCCESS
+  FAILED
+  PARTIAL
+  PENDING
+}
+
+enum TransferStatus {
+  PENDING            // Awaiting verification code
+  COMPLETED          // Transfer completed
+  CANCELED           // Canceled by sender
+  EXPIRED            // Verification code expired
+}
+
+// ==========================================
+// CORE ENTITIES - USERS & AUTH
+// ==========================================
+
+model User {
+  id              String    @id @default(uuid())
+  phone           String?   @unique
+  email           String?   @unique
+  passwordhash    String?
+  telegramid      String?   @unique
+  role            Role
+  phoneverified   Boolean   @default(false)
+  emailverified   Boolean   @default(false)
+  isactive        Boolean   @default(true)
+  isblocked       Boolean   @default(false)
+  blockedat       DateTime?
+  blockedreason   String?
+  lastloginat     DateTime?
+  lastloginip     String?
+  createdat       DateTime  @default(now())
+  updatedat       DateTime  @updatedAt
+  
+  // Relations
+  guestprofile         GuestProfile?
+  userroles            UserRole[]
+  userpermissions      UserPermission[]
+  sessions             UserSession[]
+  passwordresettokens  PasswordResetToken[]
+  emailverifications   EmailVerification[]
+  managedrestaurants   RestaurantManager[]
+  activitylogs         ActivityLog[]
+  
+  @@index([phone])
+  @@index([email])
+  @@index([telegramid])
+  @@index([role, isactive])
+}
+
+model UserRole {
+  id           String   @id @default(uuid())
+  userid       String
+  tenantid     String
+  restaurantid String?  // Null = tenant-level role
+  role         Role
+  assignedby   String?
+  assignedat   DateTime @default(now())
+  
+  // Relations
+  user         User     @relation(fields: [userid], references: [id], onDelete: Cascade)
+  tenant       Tenant   @relation(fields: [tenantid], references: [id], onDelete: Cascade)
+  restaurant   Restaurant? @relation(fields: [restaurantid], references: [id], onDelete: Cascade)
+  
+  @@unique([userid, tenantid, restaurantid, role])
+  @@index([userid, tenantid])
+  @@index([tenantid, role])
+}
+
+model UserPermission {
+  id           String   @id @default(uuid())
+  userid       String
+  tenantid     String
+  restaurantid String?  // Null = tenant-level permission
+  permission   String   // e.g., "read:guests", "write:balls"
+  grantedby    String?
+  grantedat    DateTime @default(now())
+  expiresat    DateTime? // Optional expiration
+  
+  // Relations
+  user         User     @relation(fields: [userid], references: [id], onDelete: Cascade)
+  tenant       Tenant   @relation(fields: [tenantid], references: [id], onDelete: Cascade)
+  restaurant   Restaurant? @relation(fields: [restaurantid], references: [id], onDelete: Cascade)
+  
+  @@unique([userid, tenantid, restaurantid, permission])
+  @@index([userid, tenantid])
+  @@index([permission])
+}
+
+model UserSession {
+  id              String    @id @default(uuid())
+  userid          String
+  refreshtoken    String    @unique
+  accesstoken     String?
+  deviceinfo      String?
+  ipaddress       String?
+  useragent       String?
+  isactive        Boolean   @default(true)
+  expiresat       DateTime
+  createdat       DateTime  @default(now())
+  lastactivityat  DateTime  @default(now())
+  
+  // Relations
+  user            User      @relation(fields: [userid], references: [id], onDelete: Cascade)
+  
+  @@index([userid, isactive])
+  @@index([refreshtoken])
+  @@index([expiresat])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userid    String
+  token     String   @unique
+  expiresat DateTime
+  usedat    DateTime?
+  createdat DateTime @default(now())
+  
+  // Relations
+  user      User     @relation(fields: [userid], references: [id], onDelete: Cascade)
+  
+  @@index([userid])
+  @@index([token])
+  @@index([expiresat])
+}
+
+model EmailVerification {
+  id         String    @id @default(uuid())
+  userid     String
+  email      String
+  token      String    @unique
+  verifiedat DateTime?
+  expiresat  DateTime
+  createdat  DateTime  @default(now())
+  
+  // Relations
+  user       User      @relation(fields: [userid], references: [id], onDelete: Cascade)
+  
+  @@index([userid])
+  @@index([token])
+}
+
+model UserActivityLog {
+  id          String   @id @default(uuid())
+  userid      String
+  actiontype  String   // LOGIN, LOGOUT, etc.
+  ipaddress   String?
+  useragent   String?
+  success     Boolean
+  failreason  String?
+  createdat   DateTime @default(now())
+  
+  @@index([userid, createdat])
+  @@index([actiontype, createdat])
+}
+
+// ==========================================
+// TENANTS & SUBSCRIPTIONS
+// ==========================================
+
+model Tenant {
+  id                String   @id @default(uuid())
+  name              String
+  slug              String   @unique
+  domain            String?  @unique
+  logo              String?
+  description       String?
+  isactive          Boolean  @default(true)
+  createdat         DateTime @default(now())
+  updatedat         DateTime @updatedAt
+  
+  // Relations
+  subscription      Subscription?
+  tenantlimits      TenantLimits?
+  restaurants       Restaurant[]
+  userroles         UserRole[]
+  userpermissions   UserPermission[]
+  loyaltysystems    LoyaltySystem[]
+  guestcards        GuestCard[]
+  balltransactions  BallTransaction[]
+  activitylogs      ActivityLog[]
+  
+  @@index([slug])
+  @@index([domain])
+  @@index([isactive])
+}
+
+model Subscription {
+  id                String               @id @default(uuid())
+  tenantid          String               @unique
+  plantype          SubscriptionPlanType
+  status            SubscriptionStatus
+  currentperiodstart DateTime
+  currentperiodend   DateTime
+  cancelat          DateTime?
+  canceledat        DateTime?
+  trialstart        DateTime?
+  trialend          DateTime?
+  createdat         DateTime             @default(now())
+  updatedat         DateTime             @updatedAt
+  
+  // Relations
+  tenant            Tenant               @relation(fields: [tenantid], references: [id], onDelete: Cascade)
+  plan              SubscriptionPlan     @relation(fields: [plantype], references: [type])
+  payments          Payment[]
+  invoices          Invoice[]
+  history           SubscriptionHistory[]
+  
+  @@index([tenantid])
+  @@index([status])
+  @@index([currentperiodend])
+}
+
+model SubscriptionPlan {
+  id                String               @id @default(uuid())
+  type              SubscriptionPlanType @unique
+  name              String
+  description       String?
+  pricemonthly      Decimal              @db.Decimal(10, 2)
+  priceyearly       Decimal              @db.Decimal(10, 2)
+  maxrestaurants    Int                  // -1 = unlimited
+  maxguests         Int                  // -1 = unlimited
+  features          Json                 // Array of features
+  isactive          Boolean              @default(true)
+  createdat         DateTime             @default(now())
+  updatedat         DateTime             @updatedAt
+  
+  // Relations
+  subscriptions     Subscription[]
+  
+  @@index([type])
+}
+
+model TenantLimits {
+  id                String   @id @default(uuid())
+  tenantid          String   @unique
+  maxrestaurants    Int
+  maxguests         Int
+  maxmanagers       Int
+  maxcashiers       Int
+  maxadmins         Int
+  apiratelbimit     Int      @default(1000) // requests per minute
+  createdat         DateTime @default(now())
+  updatedat         DateTime @updatedAt
+  
+  // Relations
+  tenant            Tenant   @relation(fields: [tenantid], references: [id], onDelete: Cascade)
+  
+  @@index([tenantid])
+}
+
+model Payment {
+  id              String   @id @default(uuid())
+  subscriptionid  String
+  amount          Decimal  @db.Decimal(10, 2)
+  currency        String   @default("RUB")
+  status          String   // SUCCESS, FAILED, PENDING, REFUNDED
+  paymentmethod   String   // STRIPE, YOOKASSA, etc.
+  transactionid   String?  @unique
+  metadata        Json?
+  paidat          DateTime?
+  createdat       DateTime @default(now())
+  
+  // Relations
+  subscription    Subscription @relation(fields: [subscriptionid], references: [id], onDelete: Cascade)
+  
+  @@index([subscriptionid])
+  @@index([status])
+  @@index([transactionid])
+}
+
+model Invoice {
+  id              String   @id @default(uuid())
+  subscriptionid  String
+  invoicenumber   String   @unique
+  amount          Decimal  @db.Decimal(10, 2)
+  currency        String   @default("RUB")
+  status          String   // DRAFT, OPEN, PAID, VOID, UNCOLLECTIBLE
+  pdfurl          String?
+  duedate         DateTime
+  paidat          DateTime?
+  createdat       DateTime @default(now())
+  
+  // Relations
+  subscription    Subscription @relation(fields: [subscriptionid], references: [id], onDelete: Cascade)
+  
+  @@index([subscriptionid])
+  @@index([invoicenumber])
+  @@index([status])
+}
+
+model SubscriptionHistory {
+  id              String               @id @default(uuid())
+  subscriptionid  String
+  fromplan        SubscriptionPlanType?
+  toplan          SubscriptionPlanType
+  fromstatus      SubscriptionStatus?
+  tostatus        SubscriptionStatus
+  reason          String?
+  changedby       String?
+  changedat       DateTime             @default(now())
+  
+  // Relations
+  subscription    Subscription         @relation(fields: [subscriptionid], references: [id], onDelete: Cascade)
+  
+  @@index([subscriptionid, changedat])
+}
+
+model OwnerRegistrationLink {
+  id           String   @id @default(uuid())
+  token        String   @unique
+  email        String
+  plantype     SubscriptionPlanType
+  maxuses      Int      @default(1)
+  usedcount    Int      @default(0)
+  expiresat    DateTime
+  createdby    String?
+  createdat    DateTime @default(now())
+  
+  @@index([token])
+  @@index([email])
+}
+
+// ==========================================
+// RESTAURANTS
+// ==========================================
+
+model Restaurant {
+  id                String   @id @default(uuid())
+  tenantid          String
+  name              String
+  slug              String
+  address           String?
+  city              String?
+  phone             String?
+  email             String?
+  timezone          String   @default("Europe/Moscow")
+  isactive          Boolean  @default(true)
+  createdat         DateTime @default(now())
+  updatedat         DateTime @updatedAt
+  
+  // Relations
+  tenant            Tenant              @relation(fields: [tenantid], references: [id], onDelete: Cascade)
+  loyaltysystem     LoyaltySystem?
+  managers          RestaurantManager[]
+  guestcards        GuestCard[]
+  guestvisits       GuestVisit[]
+  posintegrations   POSIntegration[]
+  userroles         UserRole[]
+  userpermissions   UserPermission[]
+  
+  @@unique([tenantid, slug])
+  @@index([tenantid])
+  @@index([isactive])
+}
+
+model RestaurantManager {
+  id           String   @id @default(uuid())
+  userid       String
+  restaurantid String
+  assignedby   String?
+  assignedat   DateTime @default(now())
+  
+  // Relations
+  user         User       @relation(fields: [userid], references: [id], onDelete: Cascade)
+  restaurant   Restaurant @relation(fields: [restaurantid], references: [id], onDelete: Cascade)
+  
+  @@unique([userid, restaurantid])
+  @@index([userid])
+  @@index([restaurantid])
+}
+
+// ==========================================
+// GUESTS & LOYALTY CARDS
+// ==========================================
+
+model GuestProfile {
+  id                    String    @id @default(uuid())
+  userid                String    @unique
+  firstname             String
+  lastname              String?
+  middlename            String?
+  gender                Gender?
+  birthdate             DateTime? @db.Date
+  city                  String?
+  address               String?
+  telegramusername      String?
+  telegramphotourl      String?
+  privacypolicyaccepted Boolean   @default(false)
+  marketingaccepted     Boolean   @default(false)
+  caneditonceevery      Int       @default(90) // days
+  lasteditedat          DateTime?
+  registrationsource    RegistrationSource
+  createdat             DateTime  @default(now())
+  updatedat             DateTime  @updatedAt
+  
+  // Relations
+  user                  User         @relation(fields: [userid], references: [id], onDelete: Cascade)
+  children              GuestChild[]
+  
+  @@index([userid])
+  @@index([birthdate])
+}
+
+model GuestChild {
+  id             String    @id @default(uuid())
+  guestprofileid String
+  name           String
+  birthdate      DateTime? @db.Date
+  gender         Gender?
+  createdat      DateTime  @default(now())
+  updatedat      DateTime  @updatedAt
+  
+  // Relations
+  guestprofile   GuestProfile @relation(fields: [guestprofileid], references: [id], onDelete: Cascade)
+  
+  @@index([guestprofileid])
+}
+
+model GuestCard {
+  id                String      @id @default(uuid())
+  userid            String      @unique
+  tenantid          String
+  restaurantid      String
+  qrcode            String      @unique
+  code6digit        String      // Not unique (regenerated)
+  balance           Int         @default(0)
+  status            CardStatus  @default(ACTIVE)
+  levelid           String?
+  carddesign        Json?       // Custom card design settings
+  lastactivityat    DateTime?
+  frozenat          DateTime?
+  frozenreason      String?
+  blockedat         DateTime?
+  blockedreason     String?
+  deletedat         DateTime?
+  deletionreason    String?
+  createdat         DateTime    @default(now())
+  updatedat         DateTime    @updatedAt
+  
+  // Relations
+  user              User                @relation(fields: [userid], references: [id], onDelete: Cascade)
+  tenant            Tenant              @relation(fields: [tenantid], references: [id], onDelete: Cascade)
+  restaurant        Restaurant          @relation(fields: [restaurantid], references: [id], onDelete: Cascade)
+  level             LoyaltyLevel?       @relation(fields: [levelid], references: [id])
+  transactions      BallTransaction[]
+  visits            GuestVisit[]
+  transferssent     BallTransfer[]      @relation("SenderCard")
+  transfersreceived BallTransfer[]      @relation("ReceiverCard")
+  promosgranted     PromoBallGranted[]
+  
+  @@index([tenantid, restaurantid, status])
+  @@index([qrcode])
+  @@index([code6digit])
+  @@index([userid])
+  @@index([levelid])
+  @@index([lastactivityat])
+}
+
+model RegistrationLink {
+  id           String   @id @default(uuid())
+  tenantid     String
+  restaurantid String
+  token        String   @unique
+  url          String
+  maxuses      Int      @default(-1) // -1 = unlimited
+  usedcount    Int      @default(0)
+  isactive     Boolean  @default(true)
+  expiresat    DateTime?
+  createdby    String?
+  createdat    DateTime @default(now())
+  
+  @@index([token])
+  @@index([tenantid, restaurantid])
+}
+
+// ==========================================
+// LOYALTY SYSTEM
+// ==========================================
+
+model LoyaltySystem {
+  id              String              @id @default(uuid())
+  tenantid        String
+  restaurantid    String?             @unique // Null = global
+  type            LoyaltySystemType
+  scope           LoyaltySystemScope
+  name            String
+  description     String?
+  isactive        Boolean             @default(true)
+  createdat       DateTime            @default(now())
+  updatedat       DateTime            @updatedAt
+  
+  // Relations
+  tenant          Tenant              @relation(fields: [tenantid], references: [id], onDelete: Cascade)
+  restaurant      Restaurant?         @relation(fields: [restaurantid], references: [id], onDelete: Cascade)
+  levels          LoyaltyLevel[]
+  rules           LoyaltyRule[]
+  promos          LoyaltyPromo[]
+  
+  @@index([tenantid, restaurantid])
+  @@index([type, scope])
+}
+
+model LoyaltyLevel {
+  id                 String        @id @default(uuid())
+  loyaltysystemid    String
+  name               String
+  description        String?
+  thresholdamount    Decimal       @db.Decimal(10, 2) // Amount to reach this level
+  discountpercentage Decimal?      @db.Decimal(5, 2)  // For DISCOUNT type
+  ballspercrub       Decimal?      @db.Decimal(10, 2) // For POINTS type (e.g., 5 balls per 1 rub)
+  order              Int           // Display order
+  color              String?       // Hex color for UI
+  icon               String?       // Icon name/URL
+  isactive           Boolean       @default(true)
+  createdat          DateTime      @default(now())
+  updatedat          DateTime      @updatedAt
+  
+  // Relations
+  loyaltysystem      LoyaltySystem @relation(fields: [loyaltysystemid], references: [id], onDelete: Cascade)
+  guestcards         GuestCard[]
+  
+  @@unique([loyaltysystemid, order])
+  @@index([loyaltysystemid])
+  @@index([thresholdamount])
+}
+
+model LoyaltyRule {
+  id              String        @id @default(uuid())
+  loyaltysystemid String
+  name            String
+  description     String?
+  conditiontype   String        // FIRST_VISIT, NTH_VISIT, AMOUNT_THRESHOLD
+  conditionvalue  Json          // { "visit_number": 1 } or { "amount": 10000 }
+  rewardtype      String        // BALLS, MULTIPLIER, BONUS_LEVEL
+  rewardvalue     Json          // { "balls": 100 } or { "multiplier": 2 }
+  priority        Int           @default(0)
+  isactive        Boolean       @default(true)
+  validfrom       DateTime?
+  validuntil      DateTime?
+  createdat       DateTime      @default(now())
+  updatedat       DateTime      @updatedAt
+  
+  // Relations
+  loyaltysystem   LoyaltySystem @relation(fields: [loyaltysystemid], references: [id], onDelete: Cascade)
+  
+  @@index([loyaltysystemid])
+  @@index([isactive, validfrom, validuntil])
+}
+
+model LoyaltyPromo {
+  id                String             @id @default(uuid())
+  loyaltysystemid   String
+  name              String
+  description       String?
+  ballamount        Int                // Balls to grant
+  maxredeemsperguest Int               @default(1)
+  totalredeems      Int                @default(0)
+  maxredeems        Int?               // Total max redeems (null = unlimited)
+  requirescondition Boolean            @default(false)
+  conditiontype     String?            // VISIT_IN_PERIOD, MIN_PURCHASE
+  conditionvalue    Json?              // { "days": 30 } or { "amount": 5000 }
+  isactive          Boolean            @default(true)
+  validfrom         DateTime
+  validuntil        DateTime
+  createdat         DateTime           @default(now())
+  updatedat         DateTime           @updatedAt
+  
+  // Relations
+  loyaltysystem     LoyaltySystem      @relation(fields: [loyaltysystemid], references: [id], onDelete: Cascade)
+  grantedto         PromoBallGranted[]
+  
+  @@index([loyaltysystemid])
+  @@index([isactive, validfrom, validuntil])
+}
+
+model PromoBallGranted {
+  id           String       @id @default(uuid())
+  promoid      String
+  guestcardid  String
+  ballamount   Int
+  grantedat    DateTime     @default(now())
+  
+  // Relations
+  promo        LoyaltyPromo @relation(fields: [promoid], references: [id], onDelete: Cascade)
+  guestcard    GuestCard    @relation(fields: [guestcardid], references: [id], onDelete: Cascade)
+  
+  @@unique([promoid, guestcardid])
+  @@index([promoid])
+  @@index([guestcardid])
+}
+
+// ==========================================
+// BALL TRANSACTIONS
+// ==========================================
+
+model BallTransaction {
+  id                String              @id @default(uuid())
+  guestcardid       String
+  tenantid          String
+  restaurantid      String?
+  type              BallTransactionType
+  amount            Int                 // Positive for earn, negative for redeem
+  balancebefore     Int
+  balanceafter      Int
+  description       String?
+  reason            String?             // Optional reason for manual ops
+  checkamount       Decimal?            @db.Decimal(10, 2)
+  postransactionid  String?
+  createdbyuserid   String?             // For manual operations
+  createdat         DateTime            @default(now())
+  
+  // Relations
+  guestcard         GuestCard           @relation(fields: [guestcardid], references: [id], onDelete: Cascade)
+  tenant            Tenant              @relation(fields: [tenantid], references: [id], onDelete: Cascade)
+  
+  @@index([guestcardid, createdat])
+  @@index([tenantid, createdat])
+  @@index([type, createdat])
+  @@index([postransactionid])
+}
+
+model BallTransfer {
+  id              String         @id @default(uuid())
+  sendercardid    String
+  receivercardid  String
+  tenantid        String
+  amount          Int
+  status          TransferStatus
+  verificationcode String?
+  isverified      Boolean        @default(false)
+  verifiedat      DateTime?
+  completedat     DateTime?
+  canceledat      DateTime?
+  cancelreason    String?
+  expiresat       DateTime
+  createdat       DateTime       @default(now())
+  
+  // Relations
+  sendercard      GuestCard      @relation("SenderCard", fields: [sendercardid], references: [id], onDelete: Cascade)
+  receivercard    GuestCard      @relation("ReceiverCard", fields: [receivercardid], references: [id], onDelete: Cascade)
+  
+  @@index([sendercardid])
+  @@index([receivercardid])
+  @@index([status, createdat])
+}
+
+model GuestVisit {
+  id                String      @id @default(uuid())
+  guestcardid       String
+  tenantid          String
+  restaurantid      String
+  visitdate         DateTime    @default(now())
+  checkamount       Decimal     @db.Decimal(10, 2)
+  itemsordered      Json?       // Array of items
+  paymentmethod     String?
+  cashieruserid     String?
+  postransactionid  String?
+  createdat         DateTime    @default(now())
+  
+  // Relations
+  guestcard         GuestCard   @relation(fields: [guestcardid], references: [id], onDelete: Cascade)
+  restaurant        Restaurant  @relation(fields: [restaurantid], references: [id], onDelete: Cascade)
+  
+  @@index([guestcardid, visitdate])
+  @@index([restaurantid, visitdate])
+  @@index([tenantid, visitdate])
+}
+
+// ==========================================
+// POS INTEGRATION
+// ==========================================
+
+model POSIntegration {
+  id              String            @id @default(uuid())
+  restaurantid    String
+  postype         POSType
+  syncddirection   POSSyncDirection
+  apiurl          String?
+  apikey          String?           // Encrypted
+  webhookurl      String?           // Our webhook URL
+  webhooksecret   String?           // For signature validation
+  isactive        Boolean           @default(true)
+  lastsyncdat     DateTime?
+  lastsyncstatus  POSSyncStatus?
+  createdat       DateTime          @default(now())
+  updatedat       DateTime          @updatedAt
+  
+  // Relations
+  restaurant      Restaurant        @relation(fields: [restaurantid], references: [id], onDelete: Cascade)
+  syncs           POSSync[]
+  transactions    POSTransaction[]
+  
+  @@unique([restaurantid, postype])
+  @@index([restaurantid])
+  @@index([postype])
+}
+
+model POSSync {
+  id                String          @id @default(uuid())
+  posintegrationid  String
+  syncstart         DateTime        @default(now())
+  syncend           DateTime?
+  status            POSSyncStatus
+  recordssynced     Int             @default(0)
+  errormessage      String?
+  metadata          Json?
+  
+  // Relations
+  posintegration    POSIntegration  @relation(fields: [posintegrationid], references: [id], onDelete: Cascade)
+  
+  @@index([posintegrationid, syncstart])
+  @@index([status])
+}
+
+model POSTransaction {
+  id                String         @id @default(uuid())
+  posintegrationid  String
+  externaltxnid     String         // POS transaction ID
+  guestphone        String?
+  checkamount       Decimal        @db.Decimal(10, 2)
+  itemsordered      Json?
+  txndate           DateTime
+  processed         Boolean        @default(false)
+  processedat       DateTime?
+  errormessage      String?
+  createdat         DateTime       @default(now())
+  
+  // Relations
+  posintegration    POSIntegration @relation(fields: [posintegrationid], references: [id], onDelete: Cascade)
+  
+  @@unique([posintegrationid, externaltxnid])
+  @@index([posintegrationid, processed])
+  @@index([guestphone])
+}
+
+// ==========================================
+// TELEGRAM INTEGRATION
+// ==========================================
+
+model TelegramBot {
+  id              String   @id @default(uuid())
+  tenantid        String   @unique
+  bottoken        String   @unique
+  botusername     String
+  webhookurl      String?
+  isactive        Boolean  @default(true)
+  createdat       DateTime @default(now())
+  updatedat       DateTime @updatedAt
+  
+  @@index([tenantid])
+}
+
+model TelegramUser {
+  id              String   @id @default(uuid())
+  userid          String   @unique
+  telegramid      String   @unique
+  username        String?
+  firstname       String?
+  lastname        String?
+  photourl        String?
+  languagecode    String?
+  createdat       DateTime @default(now())
+  updatedat       DateTime @updatedAt
+  
+  // Relations
+  sessions        TelegramSession[]
+  
+  @@index([userid])
+  @@index([telegramid])
+}
+
+model TelegramSession {
+  id              String   @id @default(uuid())
+  telegramuserid  String
+  sessiondata     Json
+  expiresat       DateTime
+  createdat       DateTime @default(now())
+  updatedat       DateTime @updatedAt
+  
+  // Relations
+  telegramuser    TelegramUser @relation(fields: [telegramuserid], references: [id], onDelete: Cascade)
+  
+  @@index([telegramuserid])
+  @@index([expiresat])
+}
+
+// ==========================================
+// ANALYTICS & REPORTS
+// ==========================================
+
+model DailyAnalytics {
+  id                String   @id @default(uuid())
+  tenantid          String
+  restaurantid      String?
+  date              DateTime @db.Date
+  totalchecks       Int      @default(0)
+  totalamount       Decimal  @default(0) @db.Decimal(12, 2)
+  totalvisits       Int      @default(0)
+  activeguests      Int      @default(0)
+  newguests         Int      @default(0)
+  returningguests   Int      @default(0)
+  averagecheck      Decimal  @default(0) @db.Decimal(10, 2)
+  ballsearned       Int      @default(0)
+  ballsredeemed     Int      @default(0)
+  ballsmanualadded  Int      @default(0)
+  ballsexpired      Int      @default(0)
+  createdat         DateTime @default(now())
+  updatedat         DateTime @updatedAt
+  
+  @@unique([tenantid, restaurantid, date])
+  @@index([tenantid, restaurantid, date])
+  @@index([date])
+}
+
+model MonthlyAnalytics {
+  id                String   @id @default(uuid())
+  tenantid          String
+  restaurantid      String?
+  year              Int
+  month             Int
+  totalchecks       Int      @default(0)
+  totalamount       Decimal  @default(0) @db.Decimal(12, 2)
+  totalvisits       Int      @default(0)
+  activeguests      Int      @default(0)
+  newguests         Int      @default(0)
+  churnedguests     Int      @default(0)
+  churnrate         Decimal  @default(0) @db.Decimal(5, 2)
+  averagecheck      Decimal  @default(0) @db.Decimal(10, 2)
+  ltv               Decimal  @default(0) @db.Decimal(10, 2)
+  roi               Decimal  @default(0) @db.Decimal(10, 2)
+  createdat         DateTime @default(now())
+  updatedat         DateTime @updatedAt
+  
+  @@unique([tenantid, restaurantid, year, month])
+  @@index([tenantid, restaurantid, year, month])
+  @@index([year, month])
+}
+
+model GuestAnalytics {
+  id                   String    @id @default(uuid())
+  guestcardid          String    @unique
+  tenantid             String
+  totalvisits          Int       @default(0)
+  totalspent           Decimal   @default(0) @db.Decimal(12, 2)
+  averagecheck         Decimal   @default(0) @db.Decimal(10, 2)
+  firstvisit           DateTime?
+  lastvisit            DateTime?
+  daysincelastvisit    Int?
+  visitfrequency       Decimal   @default(0) @db.Decimal(10, 2) // visits per month
+  ltv                  Decimal   @default(0) @db.Decimal(10, 2)
+  rfmscore             String?   // e.g., "555" (Recency-Frequency-Monetary)
+  segment              String?   // VIP, ACTIVE, AT_RISK, CHURNED
+  updatedat            DateTime  @updatedAt
+  
+  @@index([tenantid, guestcardid])
+  @@index([segment])
+  @@index([rfmscore])
+}
+
+// ==========================================
+// ACTIVITY LOG & AUDIT
+// ==========================================
+
+model ActivityLog {
+  id              String    @id @default(uuid())
+  tenantid        String
+  userid          String?
+  actiontype      ActionType
+  entitytype      String?   // USER, GUEST, LOYALTY_SYSTEM, etc.
+  entityid        String?
+  oldvalue        Json?
+  newvalue        Json?
+  reason          String?
+  description     String?
+  ipaddress       String?
+  useragent       String?
+  createdat       DateTime  @default(now())
+  
+  // Relations
+  tenant          Tenant    @relation(fields: [tenantid], references: [id], onDelete: Cascade)
+  user            User?     @relation(fields: [userid], references: [id], onDelete: SetNull)
+  
+  @@index([tenantid, createdat])
+  @@index([userid, createdat])
+  @@index([actiontype, createdat])
+  @@index([entitytype, entityid])
+}
+
+// ==========================================
+// NOTIFICATIONS
+// ==========================================
+
+model NotificationQueue {
+  id              String   @id @default(uuid())
+  userid          String
+  type            String   // EMAIL, SMS, TELEGRAM
+  channel         String?  // Specific channel (email address, phone, telegram_id)
+  subject         String?
+  message         String
+  metadata        Json?
+  status          String   @default("PENDING") // PENDING, SENT, FAILED
+  sentat          DateTime?
+  failreason      String?
+  retrycount      Int      @default(0)
+  maxretries      Int      @default(3)
+  createdat       DateTime @default(now())
+  
+  @@index([userid, status])
+  @@index([status, createdat])
+}
+
+// ==========================================
+// INDEXES & PERFORMANCE
+// ==========================================
+
+// Additional composite indexes for complex queries
+// These are defined inline in models above using @@index
+
+// Full-text search indexes
+// model User {
+//   @@index([phone(ops: raw("gin_trgm_ops"))])
+//   @@index([email(ops: raw("gin_trgm_ops"))])
+// }
